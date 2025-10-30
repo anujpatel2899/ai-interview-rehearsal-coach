@@ -1,0 +1,20 @@
+[project]
+name = "competition-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+   "audio-recorder-streamlit>=0.0.10",
+   "av>=16.0.1",
+   "groq>=0.33.0",
+   "librosa>=0.11.0",
+   "numpy>=2.3.4",
+   "opencv-python>=4.11.0.86",
+   "pillow>=11.3.0",
+   "python-dotenv>=1.2.1",
+   "reportlab>=4.4.4",
+   "soundfile>=0.13.1",
+   "streamlit>=1.50.0",
+   "streamlit-webrtc>=0.63.11",
+]

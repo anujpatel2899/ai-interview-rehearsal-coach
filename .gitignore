@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Virtual environments
+venv/
+.env
+
+# Streamlit cache
+.streamlit/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Reports
+reports/*.pdf
