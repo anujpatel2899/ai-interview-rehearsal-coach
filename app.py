@@ -1,6 +1,9 @@
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
 import os
+import streamlit as st
+from audio_recorder_streamlit import audio_recorder
+import os
 from dotenv import load_dotenv
 from collections import Counter
 import re
@@ -18,6 +21,19 @@ import cv2
 import io
 import json
 import hashlib
+
+# ----------------- Performance helpers (cache heavy resources) -----------------
+@st.cache_resource
+def _cached_groq_client(api_key: str):
+    """Create and cache a Groq client for a given API key."""
+    if not api_key:
+        return None
+    return Groq(api_key=api_key)
+
+# Load Haar cascades once to avoid repeated disk I/O on every photo analysis
+FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+SMILE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
 
 # PDF Generation
 from reportlab.lib.pagesizes import letter
@@ -209,17 +225,23 @@ def export_analytics():
 
 def get_groq_client():
     """Get Groq client - user's key preferred, fallback to system key"""
-    if 'user_api_key' in st.session_state and st.session_state.user_api_key:
+    # Prefer user-provided key (cached per-key), else use system env key (also cached)
+    user_key = st.session_state.get('user_api_key')
+    if user_key:
         try:
-            return Groq(api_key=st.session_state.user_api_key)
-        except:
+            return _cached_groq_client(user_key)
+        except Exception:
             st.error("❌ Invalid API key")
             return None
-    
+
+
     system_key = os.getenv("GROQ_API_KEY")
     if system_key:
-        return Groq(api_key=system_key)
-    
+        try:
+            return _cached_groq_client(system_key)
+        except Exception:
+            return None
+
     return None
 
 GROQ_MODEL = "openai/gpt-oss-120b"
@@ -451,27 +473,27 @@ def analyze_voice_confidence_fast(audio_bytes: bytes, transcribed_text: str) -> 
 def analyze_photo_ultra_fast(image_bytes) -> PhotoAnalysis:
     """Lightning-fast photo analysis"""
     try:
+        if image_bytes is None:
+            return PhotoAnalysis(face_detected=False, confidence="No image")
+            
         nparr = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if img is None:
-            return PhotoAnalysis()
+            return PhotoAnalysis(face_detected=False, confidence="Invalid image")
         
         img = cv2.resize(img, (320, 240))
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-        smile_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
-        
-        faces = face_cascade.detectMultiScale(gray, 1.3, 3)
+        # Use pre-loaded cascades (faster than loading from disk each call)
+        faces = FACE_CASCADE.detectMultiScale(gray, 1.3, 3)
         
         if len(faces) > 0:
             x, y, w, h = faces[0]
             roi_gray = gray[y:y+h, x:x+w]
             
-            eyes = eye_cascade.detectMultiScale(roi_gray, 1.3, 3)
-            smiles = smile_cascade.detectMultiScale(roi_gray, 1.8, 15)
+            eyes = EYE_CASCADE.detectMultiScale(roi_gray, 1.3, 3)
+            smiles = SMILE_CASCADE.detectMultiScale(roi_gray, 1.8, 15)
             
             smile_detected = len(smiles) > 0
             eye_contact = "Good ✅" if len(eyes) >= 2 else "Improve ⚠️"
@@ -488,10 +510,11 @@ def analyze_photo_ultra_fast(image_bytes) -> PhotoAnalysis:
                 eye_contact=eye_contact
             )
         else:
-            return PhotoAnalysis(face_detected=False, confidence="Low")
+            return PhotoAnalysis(face_detected=False, confidence="No face detected")
     
     except Exception as e:
-        return PhotoAnalysis()
+        st.error(f"Photo analysis error: {str(e)}")
+        return PhotoAnalysis(face_detected=False, confidence="Error")
 
 # ==================== IDEAL ANSWER & ANALYSIS ====================
 
