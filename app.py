@@ -1,9 +1,6 @@
 import streamlit as st
 from audio_recorder_streamlit import audio_recorder
 import os
-import streamlit as st
-from audio_recorder_streamlit import audio_recorder
-import os
 from dotenv import load_dotenv
 from collections import Counter
 import re
@@ -16,24 +13,10 @@ import numpy as np
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from PIL import Image
 import cv2
 import io
 import json
 import hashlib
-
-# ----------------- Performance helpers (cache heavy resources) -----------------
-@st.cache_resource
-def _cached_groq_client(api_key: str):
-    """Create and cache a Groq client for a given API key."""
-    if not api_key:
-        return None
-    return Groq(api_key=api_key)
-
-# Load Haar cascades once to avoid repeated disk I/O on every photo analysis
-FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
-SMILE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
 
 # PDF Generation
 from reportlab.lib.pagesizes import letter
@@ -159,8 +142,7 @@ def generate_session_id():
 
 def detect_device_type():
     """Detect if user is on mobile/tablet/desktop"""
-    # Note: This is a simplified detection. For production, use JavaScript.
-    return "unknown"  # Will be enhanced with JS in production
+    return "unknown"
 
 def track_event(event_name: str, properties: dict = None):
     """Track user events"""
@@ -175,19 +157,15 @@ def track_event(event_name: str, properties: dict = None):
     
     st.session_state.analytics['user_events'].append(event)
     
-    # Update specific counters
     if event_name == 'analysis_completed':
         st.session_state.analytics['analyses_completed'] += 1
         if 'time' in properties:
             st.session_state.analytics['avg_analysis_time'].append(properties['time'])
-    
     elif event_name == 'questions_generated':
         st.session_state.analytics['questions_generated'] += 1
-    
     elif event_name == 'template_selected':
         if properties and 'template' in properties:
             st.session_state.analytics['templates_used'].append(properties['template'])
-    
     elif event_name == 'language_selected':
         if properties and 'language' in properties:
             st.session_state.analytics['languages_used'].append(properties['language'])
@@ -198,7 +176,6 @@ def get_analytics_summary():
         return {}
     
     analytics = st.session_state.analytics
-    
     avg_time = 0
     if analytics['avg_analysis_time']:
         avg_time = sum(analytics['avg_analysis_time']) / len(analytics['avg_analysis_time'])
@@ -218,32 +195,43 @@ def export_analytics():
     """Export analytics as JSON"""
     if 'analytics' not in st.session_state:
         return "{}"
-    
     return json.dumps(st.session_state.analytics, indent=2)
 
 # ==================== API KEY MANAGEMENT ====================
 
+@st.cache_resource
+def _cached_groq_client(api_key: str):
+    """Create and cache a Groq client for a given API key."""
+    if not api_key:
+        return None
+    return Groq(api_key=api_key)
+
+# Load Haar cascades once to avoid repeated disk I/O
+FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+SMILE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
+
 def get_groq_client():
     """Get Groq client - user's key preferred, fallback to system key"""
-    # Prefer user-provided key (cached per-key), else use system env key (also cached)
     user_key = st.session_state.get('user_api_key')
     if user_key:
         try:
             return _cached_groq_client(user_key)
-        except Exception:
-            st.error("❌ Invalid API key")
+        except Exception as e:
+            st.error(f"❌ Invalid API key: {str(e)}")
             return None
-
-
+    
     system_key = os.getenv("GROQ_API_KEY")
     if system_key:
         try:
             return _cached_groq_client(system_key)
-        except Exception:
+        except Exception as e:
+            st.warning(f"⚠️ System API key error: {str(e)}")
             return None
-
+    
     return None
 
+# ✅ FIXED: Correct Groq model name
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 # ==================== USAGE TRACKING ====================
@@ -413,7 +401,6 @@ def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
         
         os.unlink(tmp_file_path)
         return transcription.strip()
-    
     except Exception as e:
         return f"[Error: {str(e)}]"
 
@@ -464,7 +451,6 @@ def analyze_voice_confidence_fast(audio_bytes: bytes, transcribed_text: str) -> 
             pitch_variation=round(pitch_std, 2),
             live_feedback=live_feedback
         )
-    
     except Exception as e:
         return VoiceAnalysis()
 
@@ -485,7 +471,6 @@ def analyze_photo_ultra_fast(image_bytes) -> PhotoAnalysis:
         img = cv2.resize(img, (320, 240))
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
-        # Use pre-loaded cascades (faster than loading from disk each call)
         faces = FACE_CASCADE.detectMultiScale(gray, 1.3, 3)
         
         if len(faces) > 0:
@@ -511,7 +496,6 @@ def analyze_photo_ultra_fast(image_bytes) -> PhotoAnalysis:
             )
         else:
             return PhotoAnalysis(face_detected=False, confidence="No face detected")
-    
     except Exception as e:
         st.error(f"Photo analysis error: {str(e)}")
         return PhotoAnalysis(face_detected=False, confidence="Error")
@@ -696,42 +680,46 @@ def calculate_relevance_score(answer_text: str, jd_keywords: List[str]) -> float
 
 def generate_pdf_report(session: Session) -> bytes:
     """Generate PDF report"""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
-    
-    story = []
-    styles = getSampleStyleSheet()
-    
-    title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=24,
-                                 textColor=colors.HexColor('#1f77b4'), spaceAfter=30, alignment=TA_CENTER)
-    heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontSize=16,
-                                   textColor=colors.HexColor('#2ca02c'), spaceAfter=12, spaceBefore=12)
-    
-    story.append(Paragraph("Interview Report", title_style))
-    story.append(Paragraph(f"{datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
-    story.append(Spacer(1, 0.3*inch))
-    
-    if session.jd_keywords:
-        story.append(Paragraph("Key Skills", heading_style))
-        story.append(Paragraph(", ".join(session.jd_keywords), styles['Normal']))
+    try:
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
+        
+        story = []
+        styles = getSampleStyleSheet()
+        
+        title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=24,
+                                     textColor=colors.HexColor('#1f77b4'), spaceAfter=30, alignment=TA_CENTER)
+        heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontSize=16,
+                                       textColor=colors.HexColor('#2ca02c'), spaceAfter=12, spaceBefore=12)
+        
+        story.append(Paragraph("Interview Report", title_style))
+        story.append(Paragraph(f"{datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
         story.append(Spacer(1, 0.3*inch))
-    
-    for answer in session.answers:
-        story.append(PageBreak())
-        story.append(Paragraph(f"Question {answer.q_idx}", heading_style))
-        story.append(Paragraph(answer.question, styles['Normal']))
-        story.append(Spacer(1, 0.2*inch))
         
-        story.append(Paragraph("Your Answer", heading_style))
-        story.append(Paragraph(answer.text, styles['Normal']))
-        story.append(Spacer(1, 0.2*inch))
+        if session.jd_keywords:
+            story.append(Paragraph("Key Skills", heading_style))
+            story.append(Paragraph(", ".join(session.jd_keywords), styles['Normal']))
+            story.append(Spacer(1, 0.3*inch))
         
-        if answer.ai_feedback:
-            story.append(Paragraph("AI Feedback", heading_style))
-            story.append(Paragraph(answer.ai_feedback, styles['Normal']))
-    
-    doc.build(story)
-    return buffer.getvalue()
+        for answer in session.answers:
+            story.append(PageBreak())
+            story.append(Paragraph(f"Question {answer.q_idx}", heading_style))
+            story.append(Paragraph(answer.question, styles['Normal']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            story.append(Paragraph("Your Answer", heading_style))
+            story.append(Paragraph(answer.text, styles['Normal']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            if answer.ai_feedback:
+                story.append(Paragraph("AI Feedback", heading_style))
+                story.append(Paragraph(answer.ai_feedback, styles['Normal']))
+        
+        doc.build(story)
+        return buffer.getvalue()
+    except Exception as e:
+        st.error(f"PDF generation failed: {str(e)}")
+        return b""
 
 # ==================== MOBILE-FRIENDLY UI 📱 ====================
 
@@ -740,25 +728,22 @@ def main():
         page_title="AI Interview Rehearsal Coach",
         page_icon="⚡",
         layout="wide",
-        initial_sidebar_state="auto"  # Auto-collapse on mobile
+        initial_sidebar_state="auto"
     )
     
-    # Inject mobile CSS
     inject_mobile_css()
     
-    # Initialize
     if 'session' not in st.session_state:
         st.session_state.session = Session()
     
     init_usage_tracking()
-    init_analytics()  # 📊 Track usage
+    init_analytics()
     
     session = st.session_state.session
     
-    # Track page view
     track_event('page_view')
     
-    # ==================== SIDEBAR (MOBILE-FRIENDLY) ====================
+    # ==================== SIDEBAR ====================
     with st.sidebar:
         st.title("⚙️ Settings")
         
@@ -786,20 +771,17 @@ def main():
         
         st.markdown("---")
         
-        # Mobile-friendly links
         st.markdown("### 🔗 Links")
         st.markdown("[Get API Key](https://console.groq.com/keys)")
         
         st.markdown("---")
         
-        # Analytics Dashboard
         st.markdown("### 📊 Your Stats")
         analytics = get_analytics_summary()
         st.metric("Analyses", analytics.get('analyses_completed', 0))
         if analytics.get('avg_analysis_time', 0) > 0:
             st.metric("Avg Time", f"{analytics['avg_analysis_time']:.1f}s")
         
-        # Export analytics (for admins/debugging)
         if st.checkbox("📥 Export Analytics"):
             st.download_button(
                 "Download JSON",
@@ -813,14 +795,12 @@ def main():
     st.title("⚡ AI Interview Rehearsal Coach")
     st.caption("*Mobile-optimized • Real-time coaching*")
     
-    # Check API
     if not get_groq_client():
         st.error("⚠️ **No API Key**")
         st.info("👈 Add your FREE API key in sidebar")
         st.markdown("[Get key here](https://console.groq.com/keys)")
         st.stop()
     
-    # Check usage
     if not check_usage_limit():
         st.error("⚠️ **Daily Limit Reached**")
         st.info("👈 Add API key for unlimited usage")
@@ -828,17 +808,13 @@ def main():
     
     st.markdown("---")
     
-    # ==================== MOBILE-OPTIMIZED LAYOUT ====================
-    
     st.header("🎯 Choose Your Path")
     
-    # Templates (Mobile: Full width tabs)
     tab1, tab2 = st.tabs(["🚀 Templates", "📝 Custom"])
     
     with tab1:
         template_options = list(INDUSTRY_TEMPLATES.keys())
         
-        # Mobile-friendly: Use selectbox instead of columns
         selected_template = st.selectbox(
             "Select industry:",
             options=template_options,
@@ -895,7 +871,7 @@ def main():
                     st.success(f"✅ {len(session.questions)} questions!")
                     st.rerun()
     
-    # ==================== QUESTIONS (MOBILE-OPTIMIZED) ====================
+    # ==================== QUESTIONS ====================
     
     if session.questions:
         st.markdown("---")
@@ -908,7 +884,6 @@ def main():
             with st.expander(f"**Q{idx}:** {question[:50]}...", expanded=(idx==1)):
                 st.markdown(f"### {question}")
                 
-                # Mobile: Stack vertically (handled by CSS)
                 st.markdown("#### 📸 Photo")
                 camera_photo = st.camera_input("Take photo", key=f"cam_{idx}", label_visibility="collapsed")
                 
@@ -977,7 +952,6 @@ def main():
                                 else:
                                     st.error(transcribed_text)
                 
-                # Show results (Mobile-optimized)
                 existing = next((a for a in session.answers if a.q_idx == idx), None)
                 if existing:
                     st.markdown("---")
@@ -991,7 +965,6 @@ def main():
                             st.write(existing.ideal_answer)
                             st.metric("Similarity", f"{existing.similarity_score}%")
                     
-                    # Compact metrics for mobile
                     st.markdown("### 📈 Scores")
                     col1, col2 = st.columns(2)
                     
@@ -1005,7 +978,6 @@ def main():
                             st.metric("Smile", "✅" if existing.photo_analysis.smile_detected else "❌")
                         st.metric("Relevance", f"{existing.relevance_score}%")
                     
-                    # Feedback
                     st.markdown("### 🤖 Feedback")
                     st.info(existing.ai_feedback)
                     
@@ -1013,7 +985,6 @@ def main():
                         with st.expander("✨ Improved Version"):
                             st.success(existing.improved_answer)
         
-        # PDF Download
         if session.answers:
             st.markdown("---")
             st.header("📄 Report")
@@ -1030,8 +1001,12 @@ def main():
                         use_container_width=True
                     )
                     st.success("✅ Ready!")
+    else:
+        if session.jd:
+            st.info("📋 No questions generated yet. Try again or use a different JD.")
+        else:
+            st.info("👆 Start by selecting a template or pasting a job description.")
     
-    # Footer
     st.markdown("---")
     st.caption("⚡ AI Interview Rehearsal Coach")
 
