@@ -17,6 +17,7 @@ import cv2
 import io
 import json
 import hashlib
+from pathlib import Path
 
 # PDF Generation
 from reportlab.lib.pagesizes import letter
@@ -26,7 +27,12 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 
-load_dotenv()
+# ==================== FIX 1: PROPER .ENV LOADING ====================
+env_path = Path(__file__).parent / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+else:
+    load_dotenv()
 
 # ==================== MOBILE-FRIENDLY CSS 📱 ====================
 
@@ -67,47 +73,39 @@ def inject_mobile_css():
             font-size: 1rem !important;
         }
         
-        /* Camera and Audio - Stack vertically on mobile */
         div[data-testid="column"] {
             width: 100% !important;
             flex: 100% !important;
         }
         
-        /* Metrics - Better mobile spacing */
         div[data-testid="metric-container"] {
             padding: 0.5rem !important;
         }
         
-        /* Expander - Better mobile touch */
         .streamlit-expanderHeader {
             font-size: 1.1rem !important;
             padding: 1rem !important;
         }
         
-        /* Sidebar - Slide over on mobile */
         section[data-testid="stSidebar"] {
             width: 80vw !important;
         }
     }
     
-    /* Larger touch targets for mobile */
     .stButton button {
         min-height: 3rem;
         touch-action: manipulation;
     }
     
-    /* Better text input on mobile */
     .stTextInput input, .stTextArea textarea {
-        font-size: 16px !important; /* Prevents zoom on iOS */
+        font-size: 16px !important;
     }
     
-    /* Camera preview - responsive */
     img, video {
         max-width: 100% !important;
         height: auto !important;
     }
     
-    /* Hide zoom controls on mobile */
     @media (max-width: 768px) {
         button[title="View fullscreen"] {
             display: none;
@@ -204,9 +202,13 @@ def _cached_groq_client(api_key: str):
     """Create and cache a Groq client for a given API key."""
     if not api_key:
         return None
-    return Groq(api_key=api_key)
+    try:
+        return Groq(api_key=api_key)
+    except Exception as e:
+        st.error(f"❌ Failed to create Groq client: {str(e)}")
+        return None
 
-# Load Haar cascades once to avoid repeated disk I/O
+# Load Haar cascades once
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 EYE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
 SMILE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile.xml')
@@ -218,7 +220,7 @@ def get_groq_client():
         try:
             return _cached_groq_client(user_key)
         except Exception as e:
-            st.error(f"❌ Invalid API key: {str(e)}")
+            st.error(f"❌ Invalid user API key: {str(e)}")
             return None
     
     system_key = os.getenv("GROQ_API_KEY")
@@ -231,7 +233,7 @@ def get_groq_client():
     
     return None
 
-# ✅ FIXED: Correct Groq model name
+# ==================== CORRECT GROQ MODEL ====================
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 # ==================== USAGE TRACKING ====================
@@ -380,7 +382,7 @@ class Session:
 # ==================== AUDIO PROCESSING ====================
 
 def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
-    """Multi-language transcription"""
+    """Multi-language transcription - FIXED"""
     groq_client = get_groq_client()
     if not groq_client:
         return "[Error: No API key available]"
@@ -390,19 +392,27 @@ def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
             tmp_file.write(audio_bytes)
             tmp_file_path = tmp_file.name
         
-        with open(tmp_file_path, "rb") as audio_file:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(tmp_file_path, audio_file.read()),
-                model="whisper-large-v3-turbo",
-                response_format="text",
-                language=language,
-                temperature=0.0
-            )
+        try:
+            with open(tmp_file_path, "rb") as audio_file:
+                transcription = groq_client.audio.transcriptions.create(
+                    file=(tmp_file_path, audio_file.read()),
+                    model="whisper-large-v3-turbo",
+                    response_format="text"
+                )
+                
+            if transcription:
+                return transcription.strip()
+            else:
+                return "[Error: Empty transcription]"
         
-        os.unlink(tmp_file_path)
-        return transcription.strip()
+        finally:
+            if os.path.exists(tmp_file_path):
+                os.unlink(tmp_file_path)
+            
     except Exception as e:
-        return f"[Error: {str(e)}]"
+        error_msg = str(e)
+        st.error(f"❌ Transcription failed: {error_msg}")
+        return f"[Error: {error_msg}]"
 
 def analyze_voice_confidence_fast(audio_bytes: bytes, transcribed_text: str) -> VoiceAnalysis:
     """Voice analysis with real-time feedback"""
@@ -441,7 +451,8 @@ def analyze_voice_confidence_fast(audio_bytes: bytes, transcribed_text: str) -> 
         if confidence_score >= 80:
             live_feedback.append("✨ Excellent!")
         
-        os.unlink(tmp_file_path)
+        if os.path.exists(tmp_file_path):
+            os.unlink(tmp_file_path)
         
         return VoiceAnalysis(
             confidence_score=round(confidence_score, 1),
@@ -452,6 +463,7 @@ def analyze_voice_confidence_fast(audio_bytes: bytes, transcribed_text: str) -> 
             live_feedback=live_feedback
         )
     except Exception as e:
+        st.error(f"Voice analysis error: {str(e)}")
         return VoiceAnalysis()
 
 # ==================== PHOTO ANALYSIS ====================
@@ -519,7 +531,8 @@ def generate_ideal_answer(question: str, jd_keywords: List[str]) -> str:
             max_tokens=200
         )
         return response.choices[0].message.content.strip()
-    except:
+    except Exception as e:
+        st.warning(f"Could not generate ideal answer: {str(e)}")
         return ""
 
 def calculate_similarity_score(user_answer: str, ideal_answer: str) -> float:
@@ -535,27 +548,77 @@ def calculate_similarity_score(user_answer: str, ideal_answer: str) -> float:
     
     return round(min(similarity, 100), 1)
 
-def analyze_answer_ultra_parallel(question: str, answer_text: str, jd_keywords: List[str], 
-                                  voice_analysis: Optional[VoiceAnalysis],
-                                  photo_analysis: Optional[PhotoAnalysis] = None) -> tuple:
-    """Ultra-parallel processing"""
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = {
-            executor.submit(analyze_terms, answer_text): 'terms',
-            executor.submit(calculate_relevance_score, answer_text, jd_keywords): 'relevance',
-            executor.submit(evaluate_answer_fast, question, answer_text, jd_keywords, voice_analysis, photo_analysis): 'feedback',
-            executor.submit(generate_improved_answer_fast, question, answer_text, jd_keywords): 'improved',
-            executor.submit(generate_ideal_answer, question, jd_keywords): 'ideal'
-        }
+# ==================== HYBRID APPROACH: LOCAL PARALLEL + API SEQUENTIAL ====================
+def analyze_answer_optimized(question: str, answer_text: str, jd_keywords: List[str], 
+                            voice_analysis: Optional[VoiceAnalysis],
+                            photo_analysis: Optional[PhotoAnalysis] = None) -> tuple:
+    """
+    OPTIMIZED: Fast local analysis in parallel, API calls sequential
+    
+    Step 1: Instant analysis (parallel OK - no API calls)
+    - Analyze terms (regex, Counter) ~5ms
+    - Calculate relevance (string matching) ~5ms
+    
+    Step 2: API calls (sequential to avoid rate limiting)
+    - Get feedback (1s)
+    - Get improved answer (1s)
+    - Get ideal answer (1s)
+    
+    Total time: ~3-4 seconds (acceptable)
+    """
+    
+    placeholder = st.empty()
+    
+    # STEP 1: Local analysis (parallel is safe here)
+    placeholder.info("📊 Analyzing your response...")
+    
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_terms = executor.submit(analyze_terms, answer_text)
+        future_relevance = executor.submit(calculate_relevance_score, answer_text, jd_keywords)
         
+        terms = future_terms.result()
+        relevance = future_relevance.result()
+    
+    placeholder.success("✅ Initial analysis done!")
+    time.sleep(0.3)
+    
+    # STEP 2: API calls (sequential with delays)
+    try:
         results = {}
-        for future in as_completed(futures):
-            key = futures[future]
-            results[key] = future.result()
+        
+        # Call 1: AI Feedback
+        placeholder.info("🤖 Getting AI feedback...")
+        results['feedback'] = evaluate_answer_fast(question, answer_text, jd_keywords, voice_analysis, photo_analysis)
+        time.sleep(0.7)  # Space out requests
+        
+        # Call 2: Improved answer
+        placeholder.info("✨ Generating improvement suggestions...")
+        results['improved'] = generate_improved_answer_fast(question, answer_text, jd_keywords)
+        time.sleep(0.7)
+        
+        # Call 3: Ideal answer
+        placeholder.info("⭐ Creating ideal response...")
+        results['ideal'] = generate_ideal_answer(question, jd_keywords)
+        
+        placeholder.empty()
+        
+    except Exception as e:
+        placeholder.error(f"❌ Analysis failed: {str(e)}")
+        st.warning("Showing partial results...")
+        results = {
+            'feedback': f"Error: {str(e)}",
+            'improved': "",
+            'ideal': ""
+        }
     
-    similarity = calculate_similarity_score(answer_text, results['ideal'])
+    similarity = calculate_similarity_score(answer_text, results.get('ideal', ''))
     
-    return results['terms'], results['relevance'], results['feedback'], results['improved'], results['ideal'], similarity
+    return (terms, 
+            relevance, 
+            results.get('feedback', ''), 
+            results.get('improved', ''), 
+            results.get('ideal', ''), 
+            similarity)
 
 # ==================== LLM FUNCTIONS ====================
 
@@ -579,7 +642,8 @@ def generate_questions(jd_text: str, industry: str = "") -> List[str]:
         questions = [q.strip() for q in response.choices[0].message.content.strip().split('\n') if q.strip()]
         questions = [re.sub(r'^[\d\.\)\-]+\s*', '', q) for q in questions]
         return [q for q in questions if len(q) > 10][:5]
-    except:
+    except Exception as e:
+        st.error(f"Failed to generate questions: {str(e)}")
         return []
 
 def extract_jd_keywords(jd_text: str) -> List[str]:
@@ -601,7 +665,8 @@ def extract_jd_keywords(jd_text: str) -> List[str]:
         
         keywords = [k.strip() for k in response.choices[0].message.content.strip().split(',')]
         return keywords[:10]
-    except:
+    except Exception as e:
+        st.error(f"Failed to extract keywords: {str(e)}")
         return []
 
 def evaluate_answer_fast(question: str, answer_text: str, jd_keywords: List[str], 
@@ -623,8 +688,8 @@ def evaluate_answer_fast(question: str, answer_text: str, jd_keywords: List[str]
             max_tokens=200
         )
         return response.choices[0].message.content.strip()
-    except:
-        return "Feedback unavailable"
+    except Exception as e:
+        return f"Feedback error: {str(e)}"
 
 def generate_improved_answer_fast(question: str, original_answer: str, jd_keywords: List[str]) -> str:
     """Improved answer"""
@@ -643,8 +708,8 @@ def generate_improved_answer_fast(question: str, original_answer: str, jd_keywor
             max_tokens=200
         )
         return response.choices[0].message.content.strip()
-    except:
-        return ""
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 # ==================== TEXT ANALYSIS ====================
 
@@ -721,7 +786,7 @@ def generate_pdf_report(session: Session) -> bytes:
         st.error(f"PDF generation failed: {str(e)}")
         return b""
 
-# ==================== MOBILE-FRIENDLY UI 📱 ====================
+# ==================== MAIN UI ====================
 
 def main():
     st.set_page_config(
@@ -795,15 +860,26 @@ def main():
     st.title("⚡ AI Interview Rehearsal Coach")
     st.caption("*Mobile-optimized • Real-time coaching*")
     
-    if not get_groq_client():
-        st.error("⚠️ **No API Key**")
-        st.info("👈 Add your FREE API key in sidebar")
-        st.markdown("[Get key here](https://console.groq.com/keys)")
+    groq_client = get_groq_client()
+    
+    if not groq_client:
+        st.error("⚠️ **No Valid API Key**")
+        st.info("👈 Add your FREE Groq API key in the sidebar to get started")
+        st.markdown("[Get your free key here](https://console.groq.com/keys)")
+        
+        with st.expander("ℹ️ How to get your API key"):
+            st.markdown("""
+            1. Go to https://console.groq.com/keys
+            2. Sign up or log in
+            3. Create a new API key
+            4. Copy and paste it in the sidebar
+            5. You'll get unlimited free usage!
+            """)
         st.stop()
     
     if not check_usage_limit():
         st.error("⚠️ **Daily Limit Reached**")
-        st.info("👈 Add API key for unlimited usage")
+        st.info("👈 Add API key in sidebar for unlimited usage")
         st.stop()
     
     st.markdown("---")
@@ -838,8 +914,11 @@ def main():
                 session.questions = generate_questions(session.jd, selected_template)
                 session.answers = []
                 track_event('questions_generated', {'count': len(session.questions)})
-                st.success(f"✅ {len(session.questions)} questions!")
-                st.rerun()
+                if session.questions:
+                    st.success(f"✅ {len(session.questions)} questions!")
+                    st.rerun()
+                else:
+                    st.error("Failed to generate questions. Check your API key.")
     
     with tab2:
         selected_language = st.selectbox(
@@ -868,8 +947,11 @@ def main():
                     session.questions = generate_questions(jd_input)
                     session.answers = []
                     track_event('questions_generated', {'count': len(session.questions), 'custom': True})
-                    st.success(f"✅ {len(session.questions)} questions!")
-                    st.rerun()
+                    if session.questions:
+                        st.success(f"✅ {len(session.questions)} questions!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to generate questions.")
     
     # ==================== QUESTIONS ====================
     
@@ -906,51 +988,53 @@ def main():
                         start = time.time()
                         track_event('analysis_started', {'question_idx': idx})
                         
-                        with st.spinner("⚡ Analyzing..."):
+                        with st.spinner("⚡ Processing audio & photo..."):
                             photo_bytes = camera_photo.getvalue()
                             
-                            with ThreadPoolExecutor(max_workers=3) as executor:
-                                future_transcribe = executor.submit(transcribe_audio, audio_bytes, session.language)
-                                future_photo = executor.submit(analyze_photo_ultra_fast, photo_bytes)
-                                
-                                transcribed_text = future_transcribe.result()
-                                
-                                if "[" not in transcribed_text:
-                                    future_voice = executor.submit(analyze_voice_confidence_fast, audio_bytes, transcribed_text)
-                                    
-                                    photo_analysis = future_photo.result()
-                                    voice_analysis = future_voice.result()
-                                    
-                                    term_analysis, relevance_score, ai_feedback, improved_answer, ideal_answer, similarity = analyze_answer_ultra_parallel(
-                                        question, transcribed_text, session.jd_keywords, voice_analysis, photo_analysis
-                                    )
-                                    
-                                    total_time = time.time() - start
-                                    
-                                    answer_obj = Answer(
-                                        q_idx=idx, question=question, text=transcribed_text,
-                                        voice_analysis=voice_analysis, photo_analysis=photo_analysis,
-                                        term_analysis=term_analysis, relevance_score=relevance_score,
-                                        ai_feedback=ai_feedback, improved_answer=improved_answer,
-                                        ideal_answer=ideal_answer, similarity_score=similarity
-                                    )
-                                    
-                                    session.answers = [a for a in session.answers if a.q_idx != idx]
-                                    session.answers.append(answer_obj)
-                                    session.total_times.append(total_time)
-                                    
-                                    increment_usage()
-                                    track_event('analysis_completed', {
-                                        'question_idx': idx,
-                                        'time': total_time,
-                                        'relevance_score': relevance_score,
-                                        'similarity_score': similarity
-                                    })
-                                    
-                                    st.success(f"✅ Done in {total_time:.1f}s!")
-                                    st.rerun()
-                                else:
-                                    st.error(transcribed_text)
+                            # Transcribe audio
+                            transcribed_text = transcribe_audio(audio_bytes, session.language)
+                            
+                            # Check for transcription errors
+                            if "[Error:" in transcribed_text:
+                                st.error(f"❌ {transcribed_text}")
+                                st.stop()
+                            
+                            # Analyze photo and voice
+                            photo_analysis = analyze_photo_ultra_fast(photo_bytes)
+                            voice_analysis = analyze_voice_confidence_fast(audio_bytes, transcribed_text)
+                            
+                            # Show interim results
+                            st.info(f"📝 Transcribed: {transcribed_text[:100]}...")
+                            
+                            # Run OPTIMIZED analysis with hybrid approach
+                            term_analysis, relevance_score, ai_feedback, improved_answer, ideal_answer, similarity = analyze_answer_optimized(
+                                question, transcribed_text, session.jd_keywords, voice_analysis, photo_analysis
+                            )
+                            
+                            total_time = time.time() - start
+                            
+                            answer_obj = Answer(
+                                q_idx=idx, question=question, text=transcribed_text,
+                                voice_analysis=voice_analysis, photo_analysis=photo_analysis,
+                                term_analysis=term_analysis, relevance_score=relevance_score,
+                                ai_feedback=ai_feedback, improved_answer=improved_answer,
+                                ideal_answer=ideal_answer, similarity_score=similarity
+                            )
+                            
+                            session.answers = [a for a in session.answers if a.q_idx != idx]
+                            session.answers.append(answer_obj)
+                            session.total_times.append(total_time)
+                            
+                            increment_usage()
+                            track_event('analysis_completed', {
+                                'question_idx': idx,
+                                'time': total_time,
+                                'relevance_score': relevance_score,
+                                'similarity_score': similarity
+                            })
+                            
+                            st.success(f"✅ Analysis complete in {total_time:.1f}s!")
+                            st.rerun()
                 
                 existing = next((a for a in session.answers if a.q_idx == idx), None)
                 if existing:
@@ -971,7 +1055,7 @@ def main():
                     with col1:
                         if existing.voice_analysis:
                             st.metric("Voice", f"{existing.voice_analysis.confidence_score:.0f}/100")
-                        st.metric("Words", existing.term_analysis['total_words'])
+                        st.metric("Words", existing.term_analysis.get('total_words', 0))
                     
                     with col2:
                         if existing.photo_analysis and existing.photo_analysis.face_detected:
