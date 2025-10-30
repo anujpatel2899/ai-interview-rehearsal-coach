@@ -982,20 +982,33 @@ def main():
             with st.expander(f"**Q{idx}:** {question[:50]}...", expanded=(idx==1)):
                 st.markdown(f"### {question}")
                 
-                st.markdown("#### 📸 Photo")
-                camera_photo = st.camera_input("Take photo", key=f"cam_{idx}", label_visibility="collapsed")
+                col_photo, col_audio = st.columns(2)
                 
-                st.markdown("#### 🎤 Audio")
-                audio_bytes = audio_recorder(
-                    text="", recording_color="#e74c3c", neutral_color="#3498db",
-                    icon_name="microphone", icon_size="2x", pause_threshold=3.0,
-                    sample_rate=16000, key=f"audio_{idx}"
-                )
+                with col_photo:
+                    st.markdown("#### 📸 Photo")
+                    camera_photo = st.camera_input(
+                        "Take photo", 
+                        key=f"cam_{idx}_{hash(question) % 10000}", 
+                        label_visibility="collapsed"
+                    )
+                
+                with col_audio:
+                    st.markdown("#### 🎤 Audio")
+                    audio_bytes = audio_recorder(
+                        text="", 
+                        recording_color="#e74c3c", 
+                        neutral_color="#3498db",
+                        icon_name="microphone", 
+                        icon_size="2x", 
+                        pause_threshold=3.0,
+                        sample_rate=16000, 
+                        key=f"audio_{idx}_{hash(question) % 10000}"  # ← UNIQUE KEY
+                    )
                 
                 if audio_bytes and camera_photo:
                     st.success("✅ Captured!")
                     
-                    if st.button(f"⚡ Analyze", key=f"btn_{idx}", type="primary", use_container_width=True):
+                    if st.button(f"⚡ Analyze", key=f"btn_{idx}_{hash(question) % 10000}", type="primary", use_container_width=True):
                         
                         if not check_usage_limit():
                             st.error("⚠️ Daily limit reached! Add your own API key for unlimited usage.")
