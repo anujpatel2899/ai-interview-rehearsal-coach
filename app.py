@@ -35,11 +35,9 @@ else:
     load_dotenv()
 
 # ==================== STREAMLIT SECRETS ====================
-# Try to load from Streamlit secrets first (cloud), then env variables (local)
 try:
     SYSTEM_API_KEY = st.secrets["GROQ_API_KEY"]
 except (KeyError, FileNotFoundError):
-    # Fallback to environment variable for local development
     SYSTEM_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ==================== MOBILE-FRIENDLY CSS 📱 ====================
@@ -223,7 +221,6 @@ SMILE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile
 
 def get_groq_client():
     """Get Groq client - user's key preferred, fallback to system key"""
-    # Priority 1: User's personal API key (unlimited)
     user_key = st.session_state.get('user_api_key')
     if user_key:
         try:
@@ -232,7 +229,6 @@ def get_groq_client():
             st.error(f"❌ Invalid user API key: {str(e)}")
             return None
     
-    # Priority 2: System API key from Streamlit secrets or .env (free tier)
     if SYSTEM_API_KEY:
         try:
             return _cached_groq_client(SYSTEM_API_KEY)
@@ -260,13 +256,11 @@ def init_usage_tracking():
 
 def check_usage_limit():
     """Check if user exceeded free tier"""
-    FREE_TIER_LIMIT = 5  # Changed from 10 to 5
+    FREE_TIER_LIMIT = 5
     
-    # If user has their own key, unlimited usage
     if 'user_api_key' in st.session_state and st.session_state.user_api_key:
         return True
     
-    # Otherwise check free tier limit
     if st.session_state.usage_count >= FREE_TIER_LIMIT:
         return False
     
@@ -523,10 +517,11 @@ def analyze_photo_ultra_fast(image_bytes) -> PhotoAnalysis:
         st.error(f"Photo analysis error: {str(e)}")
         return PhotoAnalysis(face_detected=False, confidence="Error")
 
-# ==================== IDEAL ANSWER & ANALYSIS ====================
+# ==================== CACHING ====================
 
-def generate_ideal_answer(question: str, jd_keywords: List[str]) -> str:
-    """Generate ideal answer"""
+@st.cache_data(ttl=3600)
+def get_ideal_answer_cached(question: str, keywords_tuple: tuple) -> str:
+    """Cache ideal answers - avoids repeated API calls for same question"""
     groq_client = get_groq_client()
     if not groq_client:
         return ""
@@ -536,7 +531,7 @@ def generate_ideal_answer(question: str, jd_keywords: List[str]) -> str:
             model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": "Provide a perfect interview answer (80-100 words)."},
-                {"role": "user", "content": f"Question: {question}\nKeywords: {', '.join(jd_keywords)}"}
+                {"role": "user", "content": f"Question: {question}\nKeywords: {', '.join(keywords_tuple)}"}
             ],
             temperature=0.7,
             max_tokens=200
@@ -546,79 +541,59 @@ def generate_ideal_answer(question: str, jd_keywords: List[str]) -> str:
         st.warning(f"Could not generate ideal answer: {str(e)}")
         return ""
 
-def calculate_similarity_score(user_answer: str, ideal_answer: str) -> float:
-    """Calculate similarity"""
-    user_words = set(re.findall(r'\b\w+\b', user_answer.lower()))
-    ideal_words = set(re.findall(r'\b\w+\b', ideal_answer.lower()))
-    
-    if not ideal_words:
-        return 0.0
-    
-    overlap = len(user_words & ideal_words)
-    similarity = (overlap / len(ideal_words)) * 100
-    
-    return round(min(similarity, 100), 1)
+# ==================== OPTIMIZED LLM FUNCTIONS ====================
 
-# ==================== HYBRID APPROACH: LOCAL PARALLEL + API SEQUENTIAL ====================
-def analyze_answer_optimized(question: str, answer_text: str, jd_keywords: List[str], 
-                            voice_analysis: Optional[VoiceAnalysis],
-                            photo_analysis: Optional[PhotoAnalysis] = None) -> tuple:
-    """Optimized: Fast local analysis in parallel, API calls sequential"""
+# ✅ NEW: Combined feedback + improved in one call
+def generate_feedback_and_improved(question: str, answer_text: str, jd_keywords: List[str], 
+                                   voice_analysis: Optional[VoiceAnalysis] = None,
+                                   photo_analysis: Optional[PhotoAnalysis] = None) -> tuple:
+    """Combined LLM call: Gets both feedback AND improved answer in ONE request (faster!)"""
+    groq_client = get_groq_client()
+    if not groq_client:
+        return "", ""
     
-    placeholder = st.empty()
-    
-    # STEP 1: Local analysis (parallel is safe here)
-    placeholder.info("📊 Analyzing your response...")
-    
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        future_terms = executor.submit(analyze_terms, answer_text)
-        future_relevance = executor.submit(calculate_relevance_score, answer_text, jd_keywords)
-        
-        terms = future_terms.result()
-        relevance = future_relevance.result()
-    
-    placeholder.success("✅ Initial analysis done!")
-    time.sleep(0.3)
-    
-    # STEP 2: API calls (sequential with delays)
     try:
-        results = {}
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {
+                    "role": "system", 
+                    "content": """Provide two things:
+1. FEEDBACK: Concise feedback on the answer (2-3 sentences max)
+2. IMPROVED: How to improve this answer (2-3 sentences max)
+
+Format your response as:
+FEEDBACK: [your feedback here]
+IMPROVED: [improvement suggestions here]"""
+                },
+                {
+                    "role": "user", 
+                    "content": f"Question: {question}\n\nAnswer: {answer_text}\n\nKeywords: {', '.join(jd_keywords)}"
+                }
+            ],
+            temperature=0.5,
+            max_tokens=300
+        )
         
-        # Call 1: AI Feedback
-        placeholder.info("🤖 Getting AI feedback...")
-        results['feedback'] = evaluate_answer_fast(question, answer_text, jd_keywords, voice_analysis, photo_analysis)
-        time.sleep(0.7)
+        response_text = response.choices[0].message.content.strip()
         
-        # Call 2: Improved answer
-        placeholder.info("✨ Generating improvement suggestions...")
-        results['improved'] = generate_improved_answer_fast(question, answer_text, jd_keywords)
-        time.sleep(0.7)
+        # Parse the response
+        feedback = ""
+        improved = ""
         
-        # Call 3: Ideal answer
-        placeholder.info("⭐ Creating ideal response...")
-        results['ideal'] = generate_ideal_answer(question, jd_keywords)
+        if "FEEDBACK:" in response_text and "IMPROVED:" in response_text:
+            parts = response_text.split("IMPROVED:")
+            feedback = parts[0].replace("FEEDBACK:", "").strip()
+            improved = parts[1].strip()
+        else:
+            # Fallback if format is different
+            feedback = response_text[:100]
+            improved = response_text[100:]
         
-        placeholder.empty()
+        return feedback, improved
         
     except Exception as e:
-        placeholder.error(f"❌ Analysis failed: {str(e)}")
-        st.warning("Showing partial results...")
-        results = {
-            'feedback': f"Error: {str(e)}",
-            'improved': "",
-            'ideal': ""
-        }
-    
-    similarity = calculate_similarity_score(answer_text, results.get('ideal', ''))
-    
-    return (terms, 
-            relevance, 
-            results.get('feedback', ''), 
-            results.get('improved', ''), 
-            results.get('ideal', ''), 
-            similarity)
-
-# ==================== LLM FUNCTIONS ====================
+        return f"Error: {str(e)}", ""
 
 def generate_questions(jd_text: str, industry: str = "") -> List[str]:
     """Generate questions"""
@@ -667,48 +642,6 @@ def extract_jd_keywords(jd_text: str) -> List[str]:
         st.error(f"Failed to extract keywords: {str(e)}")
         return []
 
-def evaluate_answer_fast(question: str, answer_text: str, jd_keywords: List[str], 
-                        voice_analysis: Optional[VoiceAnalysis] = None,
-                        photo_analysis: Optional[PhotoAnalysis] = None) -> str:
-    """AI feedback"""
-    groq_client = get_groq_client()
-    if not groq_client:
-        return "Feedback unavailable"
-    
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "Give concise feedback (4 sentences)."},
-                {"role": "user", "content": f"Q: {question}\nA: {answer_text}\nKeywords: {', '.join(jd_keywords)}"}
-            ],
-            temperature=0.4,
-            max_tokens=200
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Feedback error: {str(e)}"
-
-def generate_improved_answer_fast(question: str, original_answer: str, jd_keywords: List[str]) -> str:
-    """Improved answer"""
-    groq_client = get_groq_client()
-    if not groq_client:
-        return ""
-    
-    try:
-        response = groq_client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {"role": "system", "content": "Improve this answer (max 100 words)."},
-                {"role": "user", "content": f"Q: {question}\nOriginal: {original_answer}"}
-            ],
-            temperature=0.5,
-            max_tokens=200
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        return f"Error: {str(e)}"
-
 # ==================== TEXT ANALYSIS ====================
 
 def analyze_terms(answer_text: str) -> dict:
@@ -738,6 +671,74 @@ def calculate_relevance_score(answer_text: str, jd_keywords: List[str]) -> float
     answer_lower = answer_text.lower()
     matches = sum(1 for kw in jd_keywords if kw.lower() in answer_lower)
     return round((matches / len(jd_keywords)) * 100, 1)
+
+def calculate_similarity_score(user_answer: str, ideal_answer: str) -> float:
+    """Calculate similarity"""
+    user_words = set(re.findall(r'\b\w+\b', user_answer.lower()))
+    ideal_words = set(re.findall(r'\b\w+\b', ideal_answer.lower()))
+    
+    if not ideal_words:
+        return 0.0
+    
+    overlap = len(user_words & ideal_words)
+    similarity = (overlap / len(ideal_words)) * 100
+    
+    return round(min(similarity, 100), 1)
+
+# ==================== ULTRA-FAST ANALYSIS ====================
+# ✅ NEW: Parallel API calls with combined prompts
+def analyze_answer_ultra_fast(question: str, answer_text: str, jd_keywords: List[str], 
+                              voice_analysis: Optional[VoiceAnalysis],
+                              photo_analysis: Optional[PhotoAnalysis] = None) -> tuple:
+    """Ultra-optimized with parallel API calls and combined prompts (12-15 seconds total)"""
+    
+    placeholder = st.empty()
+    
+    # STEP 1: Local analysis (parallel - instant)
+    placeholder.info("📊 Analyzing your response...")
+    
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_terms = executor.submit(analyze_terms, answer_text)
+        f_relevance = executor.submit(calculate_relevance_score, answer_text, jd_keywords)
+        
+        terms = f_terms.result()
+        relevance = f_relevance.result()
+    
+    placeholder.success("✅ Initial analysis done!")
+    time.sleep(0.1)  # Minimal delay
+    
+    # STEP 2: Parallel AI calls (combined + ideal)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Combined call (feedback + improved in ONE API request)
+            f_combined = executor.submit(
+                generate_feedback_and_improved, 
+                question, answer_text, jd_keywords, 
+                voice_analysis, photo_analysis
+            )
+            
+            # Ideal answer (with caching - much faster on repeats)
+            f_ideal = executor.submit(
+                get_ideal_answer_cached, 
+                question, 
+                tuple(jd_keywords)  # Convert to tuple for caching
+            )
+            
+            placeholder.info("🤖 Analyzing with AI... (parallel processing)")
+            
+            # Get results as they complete
+            feedback, improved = f_combined.result()
+            ideal = f_ideal.result()
+        
+        placeholder.empty()
+        
+    except Exception as e:
+        placeholder.error(f"❌ Analysis failed: {str(e)}")
+        return {}, 0.0, f"Error: {str(e)}", "", "", 0.0
+    
+    similarity = calculate_similarity_score(answer_text, ideal)
+    
+    return terms, relevance, feedback, improved, ideal, similarity
 
 # ==================== PDF GENERATION ====================
 
@@ -829,7 +830,6 @@ def main():
             remaining = max(0, 5 - st.session_state.usage_count)
             
             if SYSTEM_API_KEY:
-                # System key is available
                 st.info(f"🆓 Free tier: {remaining}/5 requests today")
                 
                 if remaining == 0:
@@ -838,7 +838,6 @@ def main():
                 else:
                     st.success("✅ Using shared free API key")
             else:
-                # No system key available
                 st.error("⚠️ No API key configured")
                 st.info("👉 Add your API key to continue")
         
@@ -866,7 +865,7 @@ def main():
     # ==================== MAIN APP ====================
     
     st.title("⚡ AI Interview Rehearsal Coach")
-    st.caption("*Mobile-optimized • Real-time coaching*")
+    st.caption("*Mobile-optimized • Ultra-fast analysis (12-15s)*")
     
     groq_client = get_groq_client()
     
@@ -1023,8 +1022,8 @@ def main():
                             # Show interim results
                             st.info(f"📝 Transcribed: {transcribed_text[:100]}...")
                             
-                            # Run OPTIMIZED analysis with hybrid approach
-                            term_analysis, relevance_score, ai_feedback, improved_answer, ideal_answer, similarity = analyze_answer_optimized(
+                            # Run ULTRA-FAST analysis with parallel calls
+                            term_analysis, relevance_score, ai_feedback, improved_answer, ideal_answer, similarity = analyze_answer_ultra_fast(
                                 question, transcribed_text, session.jd_keywords, voice_analysis, photo_analysis
                             )
                             
@@ -1050,7 +1049,7 @@ def main():
                                 'similarity_score': similarity
                             })
                             
-                            st.success(f"✅ Analysis complete in {total_time:.1f}s!")
+                            st.success(f"✅ Analysis complete in {total_time:.1f}s! (Ultra-fast ⚡)")
                             st.rerun()
                 
                 existing = next((a for a in session.answers if a.q_idx == idx), None)
@@ -1109,7 +1108,7 @@ def main():
             st.info("👆 Start by selecting a template or pasting a job description.")
     
     st.markdown("---")
-    st.caption("⚡ AI Interview Rehearsal Coach")
+    st.caption("⚡ AI Interview Rehearsal Coach - Ultra-fast analysis powered by Groq")
 
 if __name__ == "__main__":
     main()
