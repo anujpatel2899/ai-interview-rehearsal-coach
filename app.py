@@ -27,12 +27,20 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 
-# ==================== FIX 1: PROPER .ENV LOADING ====================
+# ==================== PROPER .ENV LOADING ====================
 env_path = Path(__file__).parent / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 else:
     load_dotenv()
+
+# ==================== STREAMLIT SECRETS ====================
+# Try to load from Streamlit secrets first (cloud), then env variables (local)
+try:
+    SYSTEM_API_KEY = st.secrets["GROQ_API_KEY"]
+except (KeyError, FileNotFoundError):
+    # Fallback to environment variable for local development
+    SYSTEM_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ==================== MOBILE-FRIENDLY CSS 📱 ====================
 
@@ -215,6 +223,7 @@ SMILE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_smile
 
 def get_groq_client():
     """Get Groq client - user's key preferred, fallback to system key"""
+    # Priority 1: User's personal API key (unlimited)
     user_key = st.session_state.get('user_api_key')
     if user_key:
         try:
@@ -223,10 +232,10 @@ def get_groq_client():
             st.error(f"❌ Invalid user API key: {str(e)}")
             return None
     
-    system_key = os.getenv("GROQ_API_KEY")
-    if system_key:
+    # Priority 2: System API key from Streamlit secrets or .env (free tier)
+    if SYSTEM_API_KEY:
         try:
-            return _cached_groq_client(system_key)
+            return _cached_groq_client(SYSTEM_API_KEY)
         except Exception as e:
             st.warning(f"⚠️ System API key error: {str(e)}")
             return None
@@ -251,11 +260,13 @@ def init_usage_tracking():
 
 def check_usage_limit():
     """Check if user exceeded free tier"""
-    FREE_TIER_LIMIT = 10
+    FREE_TIER_LIMIT = 5  # Changed from 10 to 5
     
+    # If user has their own key, unlimited usage
     if 'user_api_key' in st.session_state and st.session_state.user_api_key:
         return True
     
+    # Otherwise check free tier limit
     if st.session_state.usage_count >= FREE_TIER_LIMIT:
         return False
     
@@ -382,7 +393,7 @@ class Session:
 # ==================== AUDIO PROCESSING ====================
 
 def transcribe_audio(audio_bytes: bytes, language: str = "en") -> str:
-    """Multi-language transcription - FIXED"""
+    """Multi-language transcription"""
     groq_client = get_groq_client()
     if not groq_client:
         return "[Error: No API key available]"
@@ -552,20 +563,7 @@ def calculate_similarity_score(user_answer: str, ideal_answer: str) -> float:
 def analyze_answer_optimized(question: str, answer_text: str, jd_keywords: List[str], 
                             voice_analysis: Optional[VoiceAnalysis],
                             photo_analysis: Optional[PhotoAnalysis] = None) -> tuple:
-    """
-    OPTIMIZED: Fast local analysis in parallel, API calls sequential
-    
-    Step 1: Instant analysis (parallel OK - no API calls)
-    - Analyze terms (regex, Counter) ~5ms
-    - Calculate relevance (string matching) ~5ms
-    
-    Step 2: API calls (sequential to avoid rate limiting)
-    - Get feedback (1s)
-    - Get improved answer (1s)
-    - Get ideal answer (1s)
-    
-    Total time: ~3-4 seconds (acceptable)
-    """
+    """Optimized: Fast local analysis in parallel, API calls sequential"""
     
     placeholder = st.empty()
     
@@ -589,7 +587,7 @@ def analyze_answer_optimized(question: str, answer_text: str, jd_keywords: List[
         # Call 1: AI Feedback
         placeholder.info("🤖 Getting AI feedback...")
         results['feedback'] = evaluate_answer_fast(question, answer_text, jd_keywords, voice_analysis, photo_analysis)
-        time.sleep(0.7)  # Space out requests
+        time.sleep(0.7)
         
         # Call 2: Improved answer
         placeholder.info("✨ Generating improvement suggestions...")
@@ -815,24 +813,34 @@ def main():
         st.markdown("### 🔑 API Key")
         
         user_key_input = st.text_input(
-            "Groq API Key",
+            "Groq API Key (Optional)",
             type="password",
             help="Get FREE key: console.groq.com/keys",
-            placeholder="Enter your API key"
+            placeholder="Leave empty to use free tier"
         )
         
         if user_key_input:
             st.session_state.user_api_key = user_key_input
-            st.success("✅ Unlimited usage!")
+            st.success("✅ Using your personal key - Unlimited usage!")
             track_event('api_key_added')
         else:
             st.session_state.user_api_key = None
             
             remaining = max(0, 5 - st.session_state.usage_count)
-            st.info(f"🆓 {remaining}/5 free today")
             
-            if remaining == 0:
-                st.error("⚠️ Limit reached!")
+            if SYSTEM_API_KEY:
+                # System key is available
+                st.info(f"🆓 Free tier: {remaining}/5 requests today")
+                
+                if remaining == 0:
+                    st.error("⚠️ Daily limit reached!")
+                    st.info("👉 Add your own API key for unlimited usage")
+                else:
+                    st.success("✅ Using shared free API key")
+            else:
+                # No system key available
+                st.error("⚠️ No API key configured")
+                st.info("👉 Add your API key to continue")
         
         st.markdown("---")
         
@@ -863,11 +871,20 @@ def main():
     groq_client = get_groq_client()
     
     if not groq_client:
-        st.error("⚠️ **No Valid API Key**")
-        st.info("👈 Add your FREE Groq API key in the sidebar to get started")
-        st.markdown("[Get your free key here](https://console.groq.com/keys)")
+        st.error("⚠️ **No API Key Available**")
         
-        with st.expander("ℹ️ How to get your API key"):
+        if SYSTEM_API_KEY:
+            st.info("✅ Shared API key is configured but there's an issue.")
+            st.error("Please try refreshing the page or contact support.")
+        else:
+            st.info("👈 Either:")
+            st.markdown("""
+            1. **Add your own API key** in the sidebar for unlimited usage
+            2. **Wait for the owner** to configure a shared API key
+            """)
+            st.markdown("[Get your free API key](https://console.groq.com/keys)")
+        
+        with st.expander("ℹ️ How to get your own API key"):
             st.markdown("""
             1. Go to https://console.groq.com/keys
             2. Sign up or log in
@@ -878,8 +895,8 @@ def main():
         st.stop()
     
     if not check_usage_limit():
-        st.error("⚠️ **Daily Limit Reached**")
-        st.info("👈 Add API key in sidebar for unlimited usage")
+        st.error("⚠️ **Daily Limit Reached (5 requests)**")
+        st.info("👈 Add your own API key in the sidebar for unlimited usage")
         st.stop()
     
     st.markdown("---")
@@ -982,7 +999,7 @@ def main():
                     if st.button(f"⚡ Analyze", key=f"btn_{idx}", type="primary", use_container_width=True):
                         
                         if not check_usage_limit():
-                            st.error("Limit reached!")
+                            st.error("⚠️ Daily limit reached! Add your own API key for unlimited usage.")
                             st.stop()
                         
                         start = time.time()
